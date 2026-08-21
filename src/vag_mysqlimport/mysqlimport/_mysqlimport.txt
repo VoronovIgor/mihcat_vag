@@ -1,0 +1,1 @@
+for %f in (outfile\*.csv) do mysqlimport --default-character-set=utf8mb4 --local --user=root --password=yourpassword vag_db "%f"

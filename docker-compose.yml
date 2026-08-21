@@ -1,0 +1,88 @@
+version: '3'
+
+networks:
+  vag_network:
+    external: false
+    name: ${NETWORK_NAME}
+
+services:
+
+  nginx:
+    container_name: nginx_${CONTAINER_NAME}
+    build:
+      context: ./dockerfiles
+      dockerfile: nginx.dockerfile
+    ports:
+      - "${NGINX_PORT:-3795}:80"
+    volumes:
+      - ./src/vag_interface/_interface:/var/www/html:ro
+      - ./src/vag_imgs/Imgs:/var/www/html/images/Imgs:ro
+      - ./src/vag_img_tnrpics/Tnrpics:/var/www/html/images/Tnrpics:ro
+    depends_on:
+      - php
+    restart: always
+    networks:
+      - vag_network
+    environment:
+      TZ: ${TZ}
+    labels:
+      - "logging.enabled=true"
+      - "logging.app=${CONTAINER_NAME}_nginx"
+      - "logging.environment=local"
+      - "logging.type=nginx"
+
+  php:
+    container_name: php_${CONTAINER_NAME}
+    build:
+      context: ./dockerfiles
+      dockerfile: php.dockerfile
+    volumes:
+      - ./src/vag_interface/_interface:/var/www/html:ro
+      - ./src/vag_imgs/Imgs:/var/www/html/images/Imgs:ro
+      - ./src/vag_img_tnrpics/Tnrpics:/var/www/html/images/Tnrpics:ro
+    depends_on:
+      - mysql
+    restart: always
+    networks:
+      - vag_network
+    environment:
+      TZ: ${TZ}
+      DB_HOST: mysql
+      DB_USER: ${MYSQL_USER:-epc}
+      DB_PASSWORD: ${MYSQL_PASSWORD:-epc}
+      DB_NAME: ${MYSQL_DATABASE:-vag_petka}
+    labels:
+      - "logging.enabled=true"
+      - "logging.app=${CONTAINER_NAME}_php"
+      - "logging.environment=local"
+      - "logging.type=php-fpm"
+
+  mysql:
+    container_name: mysql_${CONTAINER_NAME}
+    image: mysql:8.0
+    command: >
+      --character-set-server=utf8mb4
+      --collation-server=utf8mb4_unicode_ci
+      --default-authentication-plugin=mysql_native_password
+      --sql_mode=''
+      --innodb_buffer_pool_size=512M
+    ports:
+      - "${MYSQL_PORT:-3306}:3306"
+    volumes:
+      - ./mysql_data:/var/lib/mysql
+      - ./src/vag_dump/dump:/dumps:ro
+      - ./dockerfiles/mysql/init.sh:/docker-entrypoint-initdb.d/init.sh:ro
+    restart: always
+    networks:
+      - vag_network
+    environment:
+      TZ: ${TZ}
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-rootpassword}
+      MYSQL_DATABASE: ${MYSQL_DATABASE:-vag_petka}
+      MYSQL_USER: ${MYSQL_USER:-epc}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:-epc}
+    labels:
+      - "logging.enabled=true"
+      - "logging.app=${CONTAINER_NAME}_mysql"
+      - "logging.environment=local"
+      - "logging.type=mysql"

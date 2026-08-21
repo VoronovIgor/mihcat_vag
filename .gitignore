@@ -1,0 +1,12 @@
+mysql_data/
+src/vag_dump/dump/
+src/vag_imgs/
+src/vag_img_tnrpics/
+src/vag_interface/_interface
+src/vag_mysqlimport/mysqlimport/outfile/
+src/downloads/
+.env
+.claude/
+scripts/vehicles_export.csv
+*K-Type*
+*ebay*.csv
