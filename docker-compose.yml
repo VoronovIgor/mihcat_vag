@@ -57,6 +57,31 @@ services:
       - "logging.environment=local"
       - "logging.type=php-fpm"
 
+  vag_api:
+    container_name: api_${CONTAINER_NAME}
+    build:
+      context: ./api
+      dockerfile: Dockerfile
+    ports:
+      - "${VAG_API_PORT:-8572}:8000"
+    volumes:
+      - ./api_data:/data
+    depends_on:
+      - mysql
+      - nginx
+    restart: always
+    networks:
+      - vag_network
+    environment:
+      TZ: ${TZ}
+      MYSQL_HOST: mysql
+      MYSQL_USER: ${MYSQL_USER:-epc}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:-epc}
+      MYSQL_DB: ${MYSQL_DATABASE:-vag_petka}
+      PHP_URL: http://nginx
+      PUBLIC_URL: http://77.42.112.5:${VAG_API_PORT:-8572}
+      KEYS_DB: /data/vag_api_keys.sqlite
+
   mysql:
     container_name: mysql_${CONTAINER_NAME}
     image: mysql:8.0
