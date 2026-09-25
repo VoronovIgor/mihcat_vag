@@ -1,0 +1,90 @@
+{% extends "base.html" %}
+{% block title_suffix %} — API ключи{% endblock %}
+{% block content %}
+<div class="d-flex justify-content-between align-items-center mb-4">
+  <h4 class="mb-0">API ключи</h4>
+</div>
+
+{% if new_key %}
+<div class="alert alert-success">
+  <strong>Новый ключ создан. Сохраните его — он больше не будет показан полностью:</strong><br>
+  <code class="fs-6">{{ new_key }}</code>
+</div>
+{% endif %}
+
+<div class="card border-0 shadow-sm mb-4">
+  <div class="card-header bg-white fw-semibold">Создать API ключ</div>
+  <div class="card-body">
+    <form method="post" action="/apikeys/create" class="row g-2 align-items-end">
+      <div class="col-md-6">
+        <label class="form-label">Название клиента</label>
+        <input type="text" name="description" class="form-control" placeholder="Например: Мой сервис" required>
+      </div>
+      <div class="col-auto">
+        <button type="submit" class="btn btn-primary">Создать ключ</button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<div class="card border-0 shadow-sm">
+  <div class="card-header bg-white fw-semibold">Список ключей ({{ keys|length }})</div>
+  <div class="card-body p-0">
+    <table class="table table-hover mb-0">
+      <thead class="table-light">
+        <tr>
+          <th>ID</th>
+          <th>Описание</th>
+          <th>Ключ</th>
+          <th>Статус</th>
+          <th>Создан</th>
+          <th>Последний запрос</th>
+          <th>Запросов</th>
+          <th>Действия</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for k in keys %}
+        <tr>
+          <td class="text-muted">{{ k.id }}</td>
+          <td>{{ k.description }}</td>
+          <td><code>{{ k.key_value[:20] }}…</code></td>
+          <td>
+            {% if k.active %}
+              <span class="badge badge-active">Активен</span>
+            {% else %}
+              <span class="badge badge-inactive">Отозван</span>
+            {% endif %}
+          </td>
+          <td class="text-muted small">{{ k.created_at }}</td>
+          <td class="text-muted small">{{ k.last_used or '—' }}</td>
+          <td>{{ k.requests }}</td>
+          <td>
+            <div class="d-flex gap-1">
+              {% if k.active %}
+              <form method="post" action="/apikeys/revoke">
+                <input type="hidden" name="key_id" value="{{ k.id }}">
+                <button class="btn btn-sm btn-outline-warning">Отозвать</button>
+              </form>
+              {% else %}
+              <form method="post" action="/apikeys/activate">
+                <input type="hidden" name="key_id" value="{{ k.id }}">
+                <button class="btn btn-sm btn-outline-success">Активировать</button>
+              </form>
+              {% endif %}
+              <form method="post" action="/apikeys/delete"
+                    onsubmit="return confirm('Удалить ключ «{{ k.description }}»?')">
+                <input type="hidden" name="key_id" value="{{ k.id }}">
+                <button class="btn btn-sm btn-outline-danger">Удалить</button>
+              </form>
+            </div>
+          </td>
+        </tr>
+        {% else %}
+        <tr><td colspan="8" class="text-center text-muted py-3">Ключи не созданы</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+{% endblock %}

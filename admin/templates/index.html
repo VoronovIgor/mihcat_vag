@@ -1,0 +1,46 @@
+{% extends "base.html" %}
+{% block title_suffix %} — Главная{% endblock %}
+{% block content %}
+<h4 class="mb-4">VAG EPC REST API — Admin Panel</h4>
+
+<div class="row g-3">
+  <div class="col-md-4">
+    <div class="card border-0 shadow-sm">
+      <div class="card-body">
+        <h6 class="text-muted">Сервер</h6>
+        <code>{{ api_url }}</code>
+      </div>
+    </div>
+  </div>
+  <div class="col-md-4">
+    <div class="card border-0 shadow-sm">
+      <div class="card-body">
+        <h6 class="text-muted">Swagger UI</h6>
+        <a href="{{ api_url }}/docs" target="_blank" class="btn btn-sm btn-outline-primary">Открыть ↗</a>
+      </div>
+    </div>
+  </div>
+  <div class="col-md-4">
+    <div class="card border-0 shadow-sm">
+      <div class="card-body">
+        <h6 class="text-muted">Health check</h6>
+        <a href="{{ api_url }}/api/v1/health" target="_blank" class="btn btn-sm btn-outline-success">Проверить ↗</a>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="card border-0 shadow-sm mt-4">
+  <div class="card-body">
+    <h6>Примеры запросов</h6>
+    <p class="mb-1 text-muted small">Информация о детали:</p>
+    <pre class="bg-light p-2 rounded"><code>curl -H "X-Api-Key: YOUR_KEY" {{ api_url }}/api/v1/part/8E0959777B</code></pre>
+    <p class="mb-1 text-muted small">Цепочка замен:</p>
+    <pre class="bg-light p-2 rounded"><code>curl -H "X-Api-Key: YOUR_KEY" {{ api_url }}/api/v1/part/8E0959777B/supersessions</code></pre>
+    <p class="mb-1 text-muted small">Навигация по каталогу:</p>
+    <pre class="bg-light p-2 rounded"><code>curl -H "X-Api-Key: YOUR_KEY" "{{ api_url }}/api/v1/vehicle/708/groups?catalog=AU"
+curl -H "X-Api-Key: YOUR_KEY" "{{ api_url }}/api/v1/vehicle/708/subgroups?catalog=AU&hg=9"
+curl -H "X-Api-Key: YOUR_KEY" "{{ api_url }}/api/v1/vehicle/708/parts?catalog=AU&hg_ug=961&bildtafel2=961005"</code></pre>
+  </div>
+</div>
+{% endblock %}
