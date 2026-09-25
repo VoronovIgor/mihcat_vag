@@ -4,18 +4,24 @@ VAG EPC REST API — порт 8572
 Swagger UI: GET /docs
 
 Parts:
-  GET /api/v1/part/<number>              — информация о детали (название, замены)
-  GET /api/v1/part/<number>/cross        — OEM-кросс номера
-  GET /api/v1/part/<number>/vehicles     — автомобили, использующие деталь
-  GET /api/v1/part/<number>/price        — прайс (VAG ETKA)
-  GET /api/v1/part/<number>/images       — URL фото и схем
+  GET /api/v1/part/<number>                        — информация о детали (название, статус)
+  GET /api/v1/part/<number>/cross                  — OEM-кросс номера
+  GET /api/v1/part/<number>/supersessions          — цепочка замен (старые и новые номера)
+  GET /api/v1/part/<number>/vehicles               — автомобили, использующие деталь
+  GET /api/v1/part/<number>/price                  — прайс (VAG ETKA)
+  GET /api/v1/part/<number>/images                 — URL фото и схем
 
 Vehicles:
-  GET /api/v1/vehicles                   — поиск моделей авто
-  GET /api/v1/catalogs                   — список каталогов (AU, VW, SK, SE, PO, ML)
+  GET /api/v1/vehicles                             — поиск моделей авто
+  GET /api/v1/catalogs                             — список каталогов (AU, VW, SK, SE, PO, ML)
+
+Catalog navigation (по структуре каталога):
+  GET /api/v1/vehicle/<epis_typ>/groups            — главные группы (Hauptgruppen)
+  GET /api/v1/vehicle/<epis_typ>/subgroups         — подгруппы/схемы (?catalog=AU&hg=1)
+  GET /api/v1/vehicle/<epis_typ>/parts             — запчасти схемы (?catalog=AU&hg_ug=11&bildtafel2=110010)
 
 VIN:
-  GET /api/v1/vin/<vin>                  — расшифровка VIN (модели, комплектации)
+  GET /api/v1/vin/<vin>                            — расшифровка VIN (модели, комплектации)
 """
 
 import os
@@ -583,6 +589,281 @@ def part_images(number: str):
     })
 
 
+# ─── PART — supersessions (замены) ───────────────────────────────────────────
+@app.route("/api/v1/part/<path:number>/supersessions")
+@require_api_key
+def part_supersessions(number: str):
+    num = normalize(number)
+    if not num:
+        return jsonify({"error": "Empty part number"}), 400
+
+    lang = (request.args.get("lang", DEFAULT_LANG) or DEFAULT_LANG).upper()[:2]
+
+    # Current part rows with gruppen (contains successor numbers)
+    if len(num) <= 11:
+        cond  = "(s.teilenummer = %s OR s.teilenummer LIKE %s)"
+        cparams = [num, num.ljust(11) + "%"]
+    else:
+        cond  = "(s.teilenummer = %s OR s.teilenummer = %s)"
+        cparams = [num[:11].rstrip(), num]
+
+    rows = qry(
+        f"""
+        SELECT s.catalog, s.teilenummer, s.markt,
+               s.entfallkennzeichen, s.entfalldatum,
+               s.gruppen_count, s.gruppen
+        FROM data_stamm s
+        WHERE {cond}
+        ORDER BY s.catalog, s.teilenummer, s.markt
+        """,
+        cparams,
+    )
+
+    STATUS = {"O": "active", "L": "superseded", "F": "discontinued", "M": "referenced"}
+
+    # Parse successors from gruppen field (format: num~qty~ts_bem~ts_moa~bem~moa || ...)
+    successors = []
+    seen_succ: set = set()
+    for r in rows:
+        if not r["gruppen_count"] or not r["gruppen"]:
+            continue
+        for entry in r["gruppen"].split(" || "):
+            parts_f = entry.split("~")
+            succ_num = parts_f[0].strip() if parts_f else ""
+            if not succ_num:
+                continue
+            key = (r["catalog"], succ_num)
+            if key in seen_succ:
+                continue
+            seen_succ.add(key)
+            qty  = parts_f[1].strip() if len(parts_f) > 1 else ""
+            note = parts_f[4].strip() if len(parts_f) > 4 else ""
+            successors.append({
+                "number":  succ_num,
+                "catalog": r["catalog"],
+                "qty":     qty or None,
+                "note":    note or None,
+            })
+
+    # Predecessors: parts that list our number in their gruppen field (FULLTEXT)
+    predecessors = []
+    try:
+        ft_query = " ".join("+" + w for w in num.split())
+        pred_rows = qry(
+            """
+            SELECT s.catalog, s.teilenummer, s.markt,
+                   s.entfallkennzeichen, s.entfalldatum, s.gruppen,
+                   d.text AS name
+            FROM data_stamm s
+            LEFT JOIN data_06 d
+                ON d.catalog = s.catalog AND d.ts = s.ts_benennung AND d.lang2 = %s
+            WHERE MATCH(s.gruppen) AGAINST (%s IN BOOLEAN MODE)
+            ORDER BY s.catalog, s.teilenummer, s.markt
+            """,
+            [lang, ft_query],
+        )
+        seen_pred: set = set()
+        for r in pred_rows:
+            pnum = r["teilenummer"].strip()
+            key  = (r["catalog"], pnum)
+            if key in seen_pred:
+                continue
+            # Verify our number actually appears in gruppen (FULLTEXT can overmatch)
+            if r["gruppen"]:
+                grp_nums = {
+                    normalize(e.split("~")[0].strip())
+                    for e in r["gruppen"].split(" || ")
+                    if e.split("~")[0].strip()
+                }
+                if num not in grp_nums:
+                    continue
+            seen_pred.add(key)
+            predecessors.append({
+                "number":            pnum,
+                "catalog":           r["catalog"],
+                "name":              r["name"],
+                "status":            STATUS.get(r["entfallkennzeichen"], r["entfallkennzeichen"]),
+                "discontinued_date": r["entfalldatum"] or None,
+            })
+    except Exception:
+        pass  # if FULLTEXT index missing, just return no predecessors
+
+    return jsonify({
+        "number":       num,
+        "successors":   successors,
+        "predecessors": predecessors,
+    })
+
+
+# ─── VEHICLE — main groups (Hauptgruppen) ────────────────────────────────────
+@app.route("/api/v1/vehicle/<int:epis_typ>/groups")
+@require_api_key
+def vehicle_groups(epis_typ: int):
+    catalog = (request.args.get("catalog", "") or "").upper().strip()
+    markt   = (request.args.get("markt", "RDW") or "RDW").upper().strip()
+    lang    = (request.args.get("lang", DEFAULT_LANG) or DEFAULT_LANG).upper()[:2]
+
+    if not catalog:
+        return jsonify({"error": "catalog parameter required (AU/VW/SK/SE/PO/ML)"}), 400
+
+    # Get hauptgruppen_tabelle for this vehicle (prefer requested markt, fallback any)
+    ov = qry_one(
+        """
+        SELECT hauptgruppen_tabelle
+        FROM data_overview
+        WHERE catalog = %s AND epis_typ = %s
+        ORDER BY IF(markt = %s, 0, 1), markt
+        LIMIT 1
+        """,
+        [catalog, epis_typ, markt],
+    )
+    if not ov:
+        return jsonify({"error": "Vehicle type not found", "epis_typ": epis_typ}), 404
+
+    # hauptgruppen_tabelle is a string of single-char group codes, e.g. "1234567"
+    hg_letters = list(dict.fromkeys(ov["hauptgruppen_tabelle"] or ""))
+    hg_letters = [c for c in hg_letters if c.strip()]
+
+    if not hg_letters:
+        return jsonify({"epis_typ": epis_typ, "catalog": catalog, "count": 0, "results": []})
+
+    placeholders = ", ".join(["%s"] * len(hg_letters))
+    hg_rows = qry(
+        f"""
+        SELECT h.hg, d.text AS name, d.kurztext AS short_name
+        FROM data_hg h
+        LEFT JOIN data_06 d
+            ON d.catalog = h.catalog AND d.ts = h.hgts AND d.lang2 = %s
+        WHERE h.catalog = %s AND h.hg IN ({placeholders})
+        """,
+        [lang, catalog] + hg_letters,
+    )
+    hg_by_code = {r["hg"]: r for r in hg_rows}
+
+    results = [
+        {
+            "hg":   c,
+            "name": (hg_by_code[c]["name"] or hg_by_code[c]["short_name"]) if c in hg_by_code else None,
+        }
+        for c in hg_letters
+        if c in hg_by_code
+    ]
+    return jsonify({
+        "epis_typ": epis_typ,
+        "catalog":  catalog,
+        "count":    len(results),
+        "results":  results,
+    })
+
+
+# ─── VEHICLE — subgroups (Untergruppen/Bildtafeln) ────────────────────────────
+@app.route("/api/v1/vehicle/<int:epis_typ>/subgroups")
+@require_api_key
+def vehicle_subgroups(epis_typ: int):
+    catalog  = (request.args.get("catalog", "") or "").upper().strip()
+    hg       = (request.args.get("hg", "") or "").strip()         # main group letter, e.g. "1"
+    dir_name = (request.args.get("dir_name", "R") or "R").strip()
+
+    if not catalog:
+        return jsonify({"error": "catalog parameter required"}), 400
+
+    where  = ["catalog = %s", "dir_name = %s", "epis_typ = %s", "bildtafel2 > 0"]
+    params: list = [catalog, dir_name, str(epis_typ)]
+
+    if hg:
+        where.append("hg_ug LIKE %s")
+        params.append(hg + "%")
+
+    rows = qry(
+        f"""
+        SELECT DISTINCT hg_ug, bildtafel2
+        FROM data_kat
+        WHERE {' AND '.join(where)}
+        ORDER BY hg_ug, bildtafel2
+        LIMIT 500
+        """,
+        params,
+    )
+
+    results = [
+        {
+            "hg":         r["hg_ug"][0] if r["hg_ug"] else "",
+            "hg_ug":      r["hg_ug"],
+            "bildtafel2": r["bildtafel2"],
+        }
+        for r in rows
+    ]
+    return jsonify({
+        "epis_typ": epis_typ,
+        "catalog":  catalog,
+        "hg":       hg or None,
+        "count":    len(results),
+        "results":  results,
+    })
+
+
+# ─── VEHICLE — parts in a diagram (Bildtafel) ────────────────────────────────
+@app.route("/api/v1/vehicle/<int:epis_typ>/parts")
+@require_api_key
+def vehicle_parts(epis_typ: int):
+    catalog    = (request.args.get("catalog", "") or "").upper().strip()
+    hg_ug      = (request.args.get("hg_ug", "") or "").strip()
+    bildtafel2 = request.args.get("bildtafel2")
+    dir_name   = (request.args.get("dir_name", "R") or "R").strip()
+    lang       = (request.args.get("lang", DEFAULT_LANG) or DEFAULT_LANG).upper()[:2]
+
+    if not catalog:
+        return jsonify({"error": "catalog parameter required"}), 400
+    if not hg_ug or not bildtafel2:
+        return jsonify({"error": "hg_ug and bildtafel2 are required"}), 400
+
+    rows = qry(
+        """
+        SELECT k.id, k.teilenummer, k.teilenummer_suche, k.uou,
+               k.bild_text_position, k.einsatzdatum, k.auslaufdatum,
+               k.hg_ug, k.bildtafel2,
+               SUBSTRING_INDEX(k.stk, ' || ', 1)       AS qty,
+               REPLACE(k.benennung, ' || ', ' / ')      AS name_raw,
+               REPLACE(k.bemerkung, ' || ', ' / ')      AS note_raw,
+               d.text                                    AS name_ts
+        FROM data_kat k
+        LEFT JOIN data_06 d
+            ON d.catalog = k.catalog AND d.lang2 = %s
+            AND k.tsben != '' AND d.ts = SUBSTRING_INDEX(k.tsben, ' || ', 1)
+        WHERE k.catalog = %s AND k.dir_name = %s
+          AND k.epis_typ = %s AND k.hg_ug = %s AND k.bildtafel2 = %s
+        ORDER BY k.id
+        LIMIT 2000
+        """,
+        [lang, catalog, dir_name, str(epis_typ), hg_ug, bildtafel2],
+    )
+
+    results = []
+    for r in rows:
+        num = r["teilenummer"].strip() if r["teilenummer"] else None
+        results.append({
+            "id":           r["id"],
+            "position":     r["bild_text_position"] or None,
+            "number":       num,
+            "number_search": r["teilenummer_suche"] or None,
+            "uou":          r["uou"],
+            "qty":          r["qty"] or None,
+            "name":         r["name_ts"] or r["name_raw"] or None,
+            "note":         r["note_raw"] or None,
+            "date_from":    str(r["einsatzdatum"]) if r["einsatzdatum"] else None,
+            "date_to":      str(r["auslaufdatum"]) if r["auslaufdatum"] else None,
+        })
+
+    return jsonify({
+        "epis_typ":   epis_typ,
+        "catalog":    catalog,
+        "hg_ug":      hg_ug,
+        "bildtafel2": bildtafel2,
+        "count":      len(results),
+        "results":    results,
+    })
+
+
 # ─── DOCS (Swagger UI) ───────────────────────────────────────────────────────
 OPENAPI_SPEC = {
     "openapi": "3.0.3",
@@ -692,6 +973,56 @@ OPENAPI_SPEC = {
                     {"name": "number", "in": "path", "required": True, "schema": {"type": "string"}},
                 ],
                 "responses": {"200": {"description": "Список URL изображений"}},
+            }
+        },
+        "/api/v1/part/{number}/supersessions": {
+            "get": {
+                "summary": "Цепочка замен детали (старые и новые номера)",
+                "parameters": [
+                    {"name": "number", "in": "path", "required": True, "schema": {"type": "string"}, "description": "OEM номер детали"},
+                    {"name": "lang",   "in": "query", "schema": {"type": "string", "default": "DE"}, "description": "Язык: DE / EN"},
+                ],
+                "responses": {
+                    "200": {"description": "predecessors (старые номера) и successors (новые номера)"},
+                },
+            }
+        },
+        "/api/v1/vehicle/{epis_typ}/groups": {
+            "get": {
+                "summary": "Главные группы (Hauptgruppen) для типа авто",
+                "parameters": [
+                    {"name": "epis_typ", "in": "path",  "required": True, "schema": {"type": "integer"}, "description": "Код типа авто (epis_typ)"},
+                    {"name": "catalog",  "in": "query", "required": True, "schema": {"type": "string"},  "description": "AU / VW / SK / SE / PO / ML"},
+                    {"name": "markt",    "in": "query", "schema": {"type": "string", "default": "RDW"}, "description": "Рынок (влияет на приоритет выбора)"},
+                    {"name": "lang",     "in": "query", "schema": {"type": "string", "default": "DE"}},
+                ],
+                "responses": {"200": {"description": "Список главных групп с названиями"}},
+            }
+        },
+        "/api/v1/vehicle/{epis_typ}/subgroups": {
+            "get": {
+                "summary": "Подгруппы/схемы каталога для типа авто",
+                "parameters": [
+                    {"name": "epis_typ", "in": "path",  "required": True, "schema": {"type": "integer"}},
+                    {"name": "catalog",  "in": "query", "required": True, "schema": {"type": "string"}, "description": "AU / VW / SK ..."},
+                    {"name": "hg",       "in": "query", "schema": {"type": "string"}, "description": "Фильтр по главной группе (1 символ, напр. '1')"},
+                    {"name": "dir_name", "in": "query", "schema": {"type": "string", "default": "R"}, "description": "R = правый руль / U = USA"},
+                ],
+                "responses": {"200": {"description": "Список подгрупп (hg_ug + bildtafel2)"}},
+            }
+        },
+        "/api/v1/vehicle/{epis_typ}/parts": {
+            "get": {
+                "summary": "Запчасти конкретной схемы (Bildtafel) авто",
+                "parameters": [
+                    {"name": "epis_typ",   "in": "path",  "required": True, "schema": {"type": "integer"}},
+                    {"name": "catalog",    "in": "query", "required": True, "schema": {"type": "string"}},
+                    {"name": "hg_ug",      "in": "query", "required": True, "schema": {"type": "string"}, "description": "Код группы-подгруппы (напр. '11', '53')"},
+                    {"name": "bildtafel2", "in": "query", "required": True, "schema": {"type": "integer"}, "description": "ID схемы из /subgroups"},
+                    {"name": "dir_name",   "in": "query", "schema": {"type": "string", "default": "R"}},
+                    {"name": "lang",       "in": "query", "schema": {"type": "string", "default": "DE"}},
+                ],
+                "responses": {"200": {"description": "Список позиций с номерами запчастей"}},
             }
         },
     },
